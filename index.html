@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PROJECT ASTRA v3.0: Tactical Radar & Sub-Target Lock</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800&family=Share+Tech+Mono&display=swap');
+
+        :root {
+            --cyan: #00f3ff;
+            --cyan-dim: rgba(0, 243, 255, 0.25);
+            --amber: #ff9d00;
+            --red: #ff2a2a;
+            --green: #00ff66;
+            --bg-panel: rgba(5, 12, 22, 0.86);
+        }
+
+        * { box-sizing: border-box; user-select: none; margin: 0; padding: 0; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Share Tech Mono', monospace; color: var(--cyan); }
+        
+        #canvas-container { position: absolute; inset: 0; z-index: 1; transition: filter 0.25s ease; }
+
+        /* BỘ LỌC QUANG HỌC (THERMAL FLIR & NIGHT VISION) */
+        body.vision-thermal #canvas-container {
+            filter: contrast(195%) brightness(115%) saturate(260%) hue-rotate(190deg);
+        }
+        body.vision-nvg #canvas-container {
+            filter: sepia(100%) hue-rotate(75deg) saturate(380%) contrast(155%) brightness(115%);
+        }
+        body.vision-nvg #hud { --cyan: #00ff66; --cyan-dim: rgba(0, 255, 102, 0.3); }
+        body.vision-thermal #hud { --cyan: #ffae00; --cyan-dim: rgba(255, 174, 0, 0.3); }
+
+        /* CANVAS NHIỄU SÓNG ĐIỆN TỪ (EMP STATIC NOISE) */
+        #noise-canvas {
+            position: absolute; inset: 0; width: 100%; height: 100%;
+            z-index: 2; pointer-events: none; opacity: 0; mix-blend-mode: screen;
+        }
+
+        /* KHUNG KHÓA ĐIỂM YẾU 3D CHIẾU LÊN MÀN HÌNH 2D (3D-TO-2D SUBTARGET BRACKETS) */
+        #target-markers-layer {
+            position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden;
+        }
+        .subtarget-marker {
+            position: absolute; width: 46px; height: 46px;
+            transform: translate(-50%, -50%);
+            border: 1px dashed rgba(0, 243, 255, 0.55);
+            transition: width 0.15s, height 0.15s, border-color 0.15s;
+            display: none;
+        }
+        .subtarget-marker.locked {
+            width: 64px; height: 64px;
+            border: 2px solid var(--red);
+            box-shadow: 0 0 15px rgba(255, 42, 42, 0.6), inset 0 0 10px rgba(255, 42, 42, 0.3);
+        }
+        .subtarget-marker.locked::before {
+            content: "LOCKED"; position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+            background: var(--red); color: #fff; font-size: 0.62rem; font-weight: bold; padding: 1px 4px;
+        }
+        .subtarget-label {
+            position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%);
+            white-space: nowrap; font-size: 0.68rem; color: #fff; background: rgba(0,0,0,0.7);
+            padding: 1px 5px; border: 1px solid var(--cyan-dim);
+        }
+        .subtarget-marker.locked .subtarget-label {
+            color: var(--amber); border-color: var(--red); font-weight: bold;
+        }
+
+        /* GIAO DIỆN ĐẦU DÒ MŨI TÊN LỬA (NOSECONE SEEKER OVERLAY) */
+        #seeker-overlay {
+            position: absolute; inset: 0; z-index: 2; pointer-events: none; display: none;
+            background: radial-gradient(circle at center, transparent 48%, rgba(0, 0, 0, 0.85) 95%);
+        }
+        .seeker-frame {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 540px; height: 540px; border: 1px solid var(--cyan-dim); border-radius: 50%;
+        }
+        .seeker-crosshair {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 240px; height: 240px; border: 1px dashed var(--cyan);
+        }
+        .pitch-ladder {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 140px; height: 300px; display: flex; flex-direction: column; justify-content: space-between;
+            opacity: 0.65; transition: transform 0.05s linear;
+        }
+        .pitch-rung {
+            width: 100%; height: 8px; border-bottom: 2px solid var(--cyan);
+            border-left: 2px solid var(--cyan); border-right: 2px solid var(--cyan);
+        }
+        .seeker-telemetry {
+            position: absolute; top: 20%; left: 50%; transform: translateX(-50%);
+            font-size: 0.85rem; letter-spacing: 3px; color: var(--amber); font-weight: bold;
+            text-shadow: 0 0 8px var(--amber);
+        }
+
+        /* HUD OVERLAY CHÍNH */
+        #hud { position: absolute; inset: 0; z-index: 3; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 16px; }
+        #hud::after {
+            content: ""; position: absolute; inset: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.28) 50%);
+            background-size: 100% 4px; z-index: 10; pointer-events: none; opacity: 0.45;
+        }
+
+        .hud-top, .hud-bottom { display: flex; justify-content: space-between; align-items: flex-start; width: 100%; pointer-events: auto; }
+        .hud-bottom { align-items: flex-end; gap: 15px; }
+
+        .panel {
+            background: var(--bg-panel); border: 1px solid var(--cyan);
+            box-shadow: 0 0 15px rgba(0, 243, 255, 0.15), inset 0 0 15px rgba(0, 243, 255, 0.05);
+            padding: 12px 16px; backdrop-filter: blur(6px); position: relative;
+        }
+        .panel::before {
+            content: ""; position: absolute; top: -2px; left: -2px; width: 10px; height: 10px;
+            border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan);
+        }
+        .panel::after {
+            content: ""; position: absolute; bottom: -2px; right: -2px; width: 10px; height: 10px;
+            border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan);
+        }
+
+        h1, h2, h3 { font-family: 'Orbitron', sans-serif; text-transform: uppercase; letter-spacing: 2px; }
+        .title-main { font-size: 1.1rem; color: #fff; text-shadow: 0 0 8px var(--cyan); margin-bottom: 4px; }
+        .phase-badge { display: inline-block; padding: 3px 10px; background: var(--cyan); color: #000; font-weight: bold; font-size: 0.8rem; margin-top: 4px; }
+
+        .telemetry-grid { display: grid; grid-template-columns: repeat(2, 140px); gap: 10px; }
+        .metric-label { font-size: 0.68rem; color: #8ab; }
+        .metric-val { font-size: 1.1rem; color: #fff; font-weight: bold; }
+        .bar-wrap { width: 100%; height: 6px; background: rgba(255,255,255,0.12); margin-top: 4px; overflow: hidden; }
+        .bar-fill { height: 100%; background: var(--cyan); width: 100%; transition: width 0.15s, background 0.3s; }
+
+        /* Center Reticle & Alerts */
+        #center-hud { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; }
+        #reticle { width: 105px; height: 105px; border: 1px dashed var(--cyan-dim); border-radius: 50%; position: relative; display: flex; align-items: center; justify-content: center; margin: 0 auto; }
+        #reticle::before, #reticle::after { content: ""; position: absolute; background: var(--cyan); }
+        #reticle::before { width: 16px; height: 1px; }
+        #reticle::after { width: 1px; height: 16px; }
+        
+        #qte-prompt {
+            display: none; pointer-events: auto; background: rgba(255, 42, 42, 0.25);
+            border: 2px solid var(--red); padding: 15px 30px; margin-top: 20px;
+            animation: pulseRed 0.55s infinite alternate; cursor: pointer;
+        }
+        @keyframes pulseRed { from { box-shadow: 0 0 10px var(--red); transform: scale(0.98); } to { box-shadow: 0 0 30px var(--red); transform: scale(1.03); } }
+
+        /* Tactical Buttons & Sub-Target Selector */
+        .tactical-bar { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+        .tac-btn {
+            background: rgba(0, 243, 255, 0.12); border: 1px solid var(--cyan); color: #fff;
+            padding: 5px 9px; font-family: inherit; font-size: 0.72rem; cursor: pointer; transition: 0.2s;
+        }
+        .tac-btn:hover, .tac-btn.active { background: var(--cyan); color: #000; font-weight: bold; }
+        .tac-btn.target-btn.active { background: var(--red); border-color: var(--red); color: #fff; box-shadow: 0 0 10px var(--red); }
+
+        /* BẢN ĐỒ RADAR 3D CHIẾN THUẬT (TACTICAL RADAR MINIMAP) */
+        .bottom-left-cluster { display: flex; align-items: flex-end; gap: 14px; }
+        #radar-panel {
+            padding: 10px; display: flex; flex-direction: column; align-items: center; width: 205px;
+        }
+        .radar-header {
+            width: 100%; display: flex; justify-content: space-between; font-size: 0.68rem;
+            color: var(--amber); margin-bottom: 6px; border-bottom: 1px solid var(--cyan-dim); padding-bottom: 3px;
+        }
+        #radar-canvas {
+            background: radial-gradient(circle, rgba(0, 45, 65, 0.6) 0%, rgba(2, 10, 18, 0.95) 100%);
+            border: 1px solid var(--cyan); border-radius: 50%;
+            box-shadow: inset 0 0 18px rgba(0, 243, 255, 0.25);
+        }
+        .radar-legend {
+            display: flex; justify-content: space-around; width: 100%; font-size: 0.62rem; margin-top: 6px; color: #9cd;
+        }
+        .dot-leg { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 3px; vertical-align: middle; }
+
+        /* Modal Phase 1 */
+        #mission-control {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 790px; max-width: 95vw; z-index: 6; pointer-events: auto;
+        }
+        .module-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 14px 0; }
+        .module-col h4 { color: var(--amber); margin-bottom: 8px; font-size: 0.85rem; border-bottom: 1px solid rgba(255,157,0,0.3); padding-bottom: 4px; }
+        .opt-btn {
+            display: block; width: 100%; text-align: left; background: rgba(0, 40, 70, 0.5);
+            border: 1px solid var(--cyan-dim); color: #cde; padding: 8px 10px; margin-bottom: 6px;
+            cursor: pointer; font-family: inherit; font-size: 0.8rem; transition: 0.2s;
+        }
+        .opt-btn:hover { border-color: var(--cyan); background: rgba(0, 243, 255, 0.1); }
+        .opt-btn.active { border-color: var(--amber); background: rgba(255, 157, 0, 0.2); color: #fff; box-shadow: 0 0 10px rgba(255,157,0,0.3); }
+        .opt-desc { font-size: 0.68rem; color: #8ab; display: block; margin-top: 2px; }
+
+        .slider-row { margin: 10px 0; display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+        input[type="range"] { flex: 1; accent-color: var(--amber); cursor: pointer; }
+
+        .btn-action {
+            background: var(--cyan); color: #000; border: none; padding: 12px 26px;
+            font-family: 'Orbitron', sans-serif; font-weight: 800; font-size: 0.95rem;
+            cursor: pointer; letter-spacing: 2px; text-transform: uppercase;
+            transition: 0.2s; box-shadow: 0 0 20px rgba(0, 243, 255, 0.4);
+        }
+        .btn-action:hover { background: #fff; box-shadow: 0 0 30px #fff; }
+
+        .controls-hint { font-size: 0.75rem; line-height: 1.5; color: #bdebff; }
+        .key-tag { display: inline-block; padding: 1px 5px; border: 1px solid var(--cyan); color: #fff; font-size: 0.7rem; margin: 0 2px; background: rgba(0,243,255,0.15); }
+
+        #alert-banner {
+            position: absolute; top: 96px; left: 50%; transform: translateX(-50%);
+            background: rgba(255, 157, 0, 0.2); border: 1px solid var(--amber); color: var(--amber);
+            padding: 7px 22px; font-family: 'Orbitron', sans-serif; font-size: 0.82rem;
+            display: none; pointer-events: none; text-shadow: 0 0 8px var(--amber);
+        }
+
+        #end-screen {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 560px; text-align: center; display: none; z-index: 7; pointer-events: auto;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+<canvas id="noise-canvas"></canvas>
+
+<!-- LỚP HIỂN THỊ KHUNG KHÓA ĐIỂM YẾU 3D-TO-2D TRÊN TÀU MẸ -->
+<div id="target-markers-layer">
+    <div id="marker-core" class="subtarget-marker locked">
+        <div class="subtarget-label">[1] LÕI PHẢN ỨNG (CORE)</div>
+    </div>
+    <div id="marker-turret" class="subtarget-marker">
+        <div class="subtarget-label">[2] THÁP PHÁO CIWS</div>
+    </div>
+    <div id="marker-engine" class="subtarget-marker">
+        <div class="subtarget-label">[3] ĐỘNG CƠ HYPER-DRIVE</div>
+    </div>
+</div>
+
+<!-- KHUNG NGẮM ĐẦU DÒ QUANG HỌC MŨI TÊN LỬA (1ST-PERSON NOSECONE SEEKER) -->
+<div id="seeker-overlay">
+    <div class="seeker-telemetry">OPTICAL SEEKER LOCK // <span id="seeker-mode-txt">DAYLIGHT TV</span></div>
+    <div class="seeker-frame"></div>
+    <div class="seeker-crosshair"></div>
+    <div class="pitch-ladder" id="pitch-ladder">
+        <div class="pitch-rung"></div>
+        <div class="pitch-rung"></div>
+        <div class="pitch-rung"></div>
+        <div class="pitch-rung"></div>
+    </div>
+</div>
+
+<!-- HUD GIAO DIỆN ĐIỀU KHIỂN VỆ TINH -->
+<div id="hud">
+    <div class="hud-top">
+        <div class="panel">
+            <div class="title-main">PROJECT ASTRA v3.0 // TACTICAL COMMAND</div>
+            <div>TRẠNG THÁI: <span id="hud-phase" class="phase-badge">GIAI ĐOẠN 1: ASTROGATION</span></div>
+            <div style="margin-top:5px; font-size:0.75rem; color:#9cd;">CẤU HÌNH: <span id="hud-loadout" style="color:#fff">CHEM / KINETIC / RADAR</span></div>
+            <div class="tactical-bar">
+                <button class="tac-btn" id="btn-cam" onclick="toggleCameraMode()">[C] CAM: CHASE</button>
+                <button class="tac-btn" id="btn-vis" onclick="cycleVisionMode()">[V] SENSOR: NORMAL</button>
+            </div>
+            <div style="margin-top:6px; font-size:0.7rem; color:var(--amber);">KHÓA ĐIỂM YẾU TÀU MẸ ([TAB] / [1-3]):</div>
+            <div class="tactical-bar" style="margin-top:3px;">
+                <button class="tac-btn target-btn active" id="btn-sub-core" onclick="setSubTarget('core')">[1] LÕI CHÍNH</button>
+                <button class="tac-btn target-btn" id="btn-sub-turret" onclick="setSubTarget('turret')">[2] PHÁO CIWS</button>
+                <button class="tac-btn target-btn" id="btn-sub-engine" onclick="setSubTarget('engine')">[3] ĐỘNG CƠ</button>
+            </div>
+        </div>
+
+        <div class="panel telemetry-grid">
+            <div>
+                <div class="metric-label">VẬN TỐC (VELOCITY)</div>
+                <div class="metric-val"><span id="val-vel">0.0</span> km/s</div>
+            </div>
+            <div>
+                <div class="metric-label">CỰ LY MỤC TIÊU</div>
+                <div class="metric-val"><span id="val-dist">12,500</span> km</div>
+            </div>
+            <div>
+                <div class="metric-label">NHIÊN LIỆU ($\Delta v$)</div>
+                <div class="bar-wrap"><div id="bar-fuel" class="bar-fill"></div></div>
+            </div>
+            <div>
+                <div class="metric-label">ĐỘ BỀN THÂN VỎ (HULL)</div>
+                <div class="bar-wrap"><div id="bar-hull" class="bar-fill" style="background:var(--green)"></div></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="alert-banner">CẢNH BÁO: PHÁT HIỆN VÀNH ĐAI THIÊN THẠCH & LƯỚI PHÒNG KHÔNG CIWS</div>
+
+    <div id="center-hud">
+        <div id="reticle"></div>
+        <div id="qte-prompt">
+            <h3 style="color:var(--red)">NHIÊN LIỆU TẦNG 1 CẠN - ĐẠT MAX-Q!</h3>
+            <p style="color:#fff; margin-top:5px;">NHẤN <span class="key-tag">[SPACE]</span> HOẶC CLICK ĐỂ TÁCH TẦNG ĐẨY!</p>
+        </div>
+    </div>
+
+    <div class="hud-bottom">
+        <!-- CỤM BẢN ĐỒ RADAR 3D THU NHỎ + HƯỚNG DẪN ĐIỀU KHIỂN -->
+        <div class="bottom-left-cluster">
+            <div id="radar-panel" class="panel">
+                <div class="radar-header">
+                    <span>3D TACTICAL RADAR</span>
+                    <span id="radar-range-lbl">RNG: 1200km</span>
+                </div>
+                <canvas id="radar-canvas" width="175" height="175"></canvas>
+                <div class="radar-legend">
+                    <span><i class="dot-leg" style="background:#ff2a2a"></i>CIWS</span>
+                    <span><i class="dot-leg" style="background:#99aabb"></i>Thiên thạch</span>
+                    <span><i class="dot-leg" style="background:#00ff66"></i>Mục tiêu</span>
+                </div>
+            </div>
+
+            <div class="panel controls-hint">
+                <div style="color:var(--amber); font-weight:bold; margin-bottom:4px;">BẢNG ĐIỀU KHIỂN CHIẾN THUẬT:</div>
+                <div><span class="key-tag">W</span><span class="key-tag">S</span><span class="key-tag">A</span><span class="key-tag">D</span> / <span class="key-tag">Chuột</span> : Lái RCS | <span class="key-tag">TAB</span> hoặc <span class="key-tag">1</span><span class="key-tag">2</span><span class="key-tag">3</span> : Đổi Điểm Yếu Tàu Mẹ</div>
+                <div><span class="key-tag">C</span> : Camera Mũi tên lửa | <span class="key-tag">V</span> : Ảnh Nhiệt (FLIR / NVG) | <span class="key-tag">F</span> : Phóng Mồi bẫy (Flares)</div>
+                <div><span class="key-tag">SHIFT</span> : Đốt tăng lực | <span class="key-tag">T</span> : Bullet-Time ($0.3\times$) | <span class="key-tag">SPACE</span> : Tách tầng / MIRV</div>
+            </div>
+        </div>
+
+        <div class="panel" style="text-align:right">
+            <div class="metric-label">MỤC TIÊU KHÓA (SUB-TARGET LOCK)</div>
+            <div id="val-subtarget" style="color:var(--red); font-size:0.95rem; font-weight:bold;">[1] LÕI PHẢN ỨNG CHÍNH</div>
+            <div class="metric-label" style="margin-top:5px;">DẪN ĐƯỜNG TỶ LỆ (PN GUIDANCE)</div>
+            <div id="val-guidance" style="color:var(--green); font-size:0.88rem; font-weight:bold;">STANDBY - ORBITAL CALC</div>
+            <div class="metric-label" style="margin-top:5px;">MỒI BẪY NHIỆT (COUNTERMEASURES)</div>
+            <div id="val-flares" style="color:var(--amber); font-size:1.0rem; font-weight:bold;">■ ■ ■ ■ ■ (5/5)</div>
+        </div>
+    </div>
+</div>
+
+<!-- MODAL GIAI ĐOẠN 1 -->
+<div id="mission-control" class="panel">
+    <h2 style="color:#fff; border-bottom:1px solid var(--cyan); padding-bottom:8px;">
+        TRUNG TÂM CHỈ HUY & XƯỞNG LẮP RÁP QUỸ ĐẠO (PHASE 1)
+    </h2>
+    <p style="font-size:0.8rem; color:#9cd; margin-top:6px;">
+        Thiết lập cấu hình Tên lửa hành trình liên hành tinh (ICM). Quan sát <strong>Bản đồ Radar 3D</strong> ở góc dưới bên trái và nhấn <strong>[TAB]</strong> (hoặc phím <strong>1, 2, 3</strong>) khi bay để chuyển đổi mục tiêu giữa <em>Lõi Phản Ứng, Tháp Pháo CIWS và Động Cơ Tàu Mẹ</em>.
+    </p>
+
+    <div class="module-grid">
+        <div class="module-col">
+            <h4>1. ĐỘNG CƠ ĐẨY (PROPULSION)</h4>
+            <button class="opt-btn active" onclick="selectMod('engine', 'chem', this)">
+                <strong>Hóa học Siêu thanh</strong>
+                <span class="opt-desc">Gia tốc cực đại, tốn nhiên liệu</span>
+            </button>
+            <button class="opt-btn" onclick="selectMod('engine', 'ion', this)">
+                <strong>Động cơ Ion Hall-Effect</strong>
+                <span class="opt-desc">Tiết kiệm $\Delta v$, tàng hình nhiệt</span>
+            </button>
+            <button class="opt-btn" onclick="selectMod('engine', 'fusion', this)">
+                <strong>Nhiệt Hạch Xung (Fusion)</strong>
+                <span class="opt-desc">Tốc độ & nhiên liệu tối đa</span>
+            </button>
+        </div>
+
+        <div class="module-col">
+            <h4>2. ĐẦU ĐẠN (PAYLOAD)</h4>
+            <button class="opt-btn active" onclick="selectMod('warhead', 'kinetic', this)">
+                <strong>Động năng (Rods from God)</strong>
+                <span class="opt-desc">Sát thương theo vận tốc $E_k = \frac{1}{2}mv^2$</span>
+            </button>
+            <button class="opt-btn" onclick="selectMod('warhead', 'casaba', this)">
+                <strong>Nhiệt hạch Casaba-Howitzer</strong>
+                <span class="opt-desc">Phóng giáo Plasma hội tụ tầm gần</span>
+            </button>
+            <button class="opt-btn" onclick="selectMod('warhead', 'mirv', this)">
+                <strong>Đa phân mảnh (MIRV)</strong>
+                <span class="opt-desc">Nhấn [SPACE] ở Phase 4 để tấn công cả 3 mục tiêu!</span>
+            </button>
+        </div>
+
+        <div class="module-col">
+            <h4>3. CẢM BIẾN & AI (AVIONICS)</h4>
+            <button class="opt-btn active" onclick="selectMod('sensor', 'radar', this)">
+                <strong>Radar Mảng Pha Chủ Động</strong>
+                <span class="opt-desc">Mở rộng tầm quét Minimap Radar 3D</span>
+            </button>
+            <button class="opt-btn" onclick="selectMod('sensor', 'stealth', this)">
+                <strong>Vỏ Làm Mát Nitơ Lỏng</strong>
+                <span class="opt-desc">Giảm 50% độ chính xác pháo địch</span>
+            </button>
+            <button class="opt-btn" onclick="selectMod('sensor', 'ai', this)">
+                <strong>Lõi AI Lượng Tử (PN+)</strong>
+                <span class="opt-desc">Tự động bẻ lái bám chặt Điểm yếu đã khóa</span>
+            </button>
+        </div>
+    </div>
+
+    <div style="background:rgba(0,20,40,0.6); padding:10px 14px; border:1px solid var(--cyan-dim);">
+        <div class="slider-row">
+            <span style="font-size:0.82rem; color:var(--amber);">GÓC PHÓNG QUỸ ĐẠO (LAUNCH INCLINATION): <strong id="lbl-angle">24°</strong></span>
+            <input type="range" id="sl-angle" min="-45" max="45" value="24" oninput="updateTrajectoryPreview()">
+        </div>
+        <div class="slider-row">
+            <span style="font-size:0.82rem; color:var(--cyan);">CỬA SỔ PHÓNG (GRAVITY ASSIST TIMING): <strong id="lbl-window">HIỆU SUẤT 85%</strong></span>
+            <input type="range" id="sl-window" min="10" max="100" value="85" oninput="updateTrajectoryPreview()">
+        </div>
+    </div>
+
+    <div style="margin-top:14px; display:flex; justify-content:space-between; align-items:center;">
+        <div style="font-size:0.78rem; color:#8f9;">*Mẹo: Dùng đầu đạn MIRV và nhấn [SPACE] ở Phase 4 để chia đạn con đánh sập cả 3 hệ thống cùng lúc!</div>
+        <button class="btn-action" onclick="initiateLaunch()">KHỞI ĐỘNG PHÓNG (IGNITION)</button>
+    </div>
+</div>
+
+<!-- MÀN HÌNH KẾT THÚC NHIỆM VỤ -->
+<div id="end-screen" class="panel">
+    <h1 id="end-title" style="font-size:1.45rem; color:var(--green); margin-bottom:10px;">MỤC TIÊU BỊ HỦY DIỆT HOÀN TOÀN</h1>
+    <p id="end-desc" style="color:#cde; font-size:0.88rem; line-height:1.5; margin-bottom:14px;"></p>
+    <div id="end-stats" style="background:rgba(0,0,0,0.5); padding:12px; margin-bottom:15px; font-size:0.84rem; text-align:left; border-left:3px solid var(--cyan);"></div>
+    <button class="btn-action" onclick="resetToPhase1()">QUAY LẠI TRUNG TÂM CHỈ HUY</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+/* ============================================================================
+   1. HỆ THỐNG ÂM THANH TỔNG HỢP (WEB AUDIO SYNTHESIZER)
+   ============================================================================ */
+class SoundFX {
+    constructor() { this.ctx = null; }
+    init() { if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+    playExplosion(duration = 1.2, freq = 90) {
+        if (!this.ctx) return;
+        const bufferSize = this.ctx.sampleRate * duration;
+        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+        const noise = this.ctx.createBufferSource();
+        noise.buffer = buffer;
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(freq, this.ctx.currentTime);
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0.55, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+        noise.connect(filter); filter.connect(gain); gain.connect(this.ctx.destination);
+        noise.start();
+    }
+    playBeep(freq = 880, dur = 0.08) {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+        gain.gain.setValueAtTime(0.14, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + dur);
+        osc.connect(gain); gain.connect(this.ctx.destination);
+        osc.start(); osc.stop(this.ctx.currentTime + dur);
+    }
+}
+const sfx = new SoundFX();
+
+/* ============================================================================
+   2. TRẠNG THÁI GAME, SUB-TARGET LOCKING & CẤU HÌNH MODULE
+   ============================================================================ */
+const GAME = {
+    phase: 1,
+    config: { engine: 'chem', warhead: 'kinetic', sensor: 'radar' },
+    fuel: 100,
+    hull: 100,
+    flares: 5,
+    velocity: 0,
+    distance: 12500,
+    stageSeparated: false,
+    qteActive: false,
+    timeScale: 1.0,
+    steerX: 0,
+    steerY: 0,
+    targetSteerX: 0,
+    targetSteerY: 0,
+    boosting: false,
+    mirvDeployed: false,
+    cameraMode: 'chase',
+    visionMode: 'normal',
+    lockedSubTarget: 'core', // 'core', 'turret', 'engine'
+    radarSweepAngle: 0
+};
+
+const SUBTARGET_INFO = {
+    core: { name: '[1] LÕI PHẢN ỨNG CHÍNH (CORE)', desc: 'Hủy diệt hoàn toàn Tàu mẹ bằng phản ứng dây chuyền' },
+    turret: { name: '[2] THÁP PHÁO PHÒNG KHÔNG (CIWS)', desc: 'Vô hiệu hóa 100% hỏa lực phòng thủ của Tàu mẹ' },
+    engine: { name: '[3] ĐỘNG CƠ HYPER-DRIVE', desc: 'Phá hủy động cơ bước sóng, khiến Tàu mẹ bất động' }
+};
+
+window.selectMod = (type, val, btn) => {
+    sfx.init(); sfx.playBeep(1200, 0.06);
+    GAME.config[type] = val;
+    btn.parentElement.querySelectorAll('.opt-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('hud-loadout').innerText =
+        `${GAME.config.engine.toUpperCase()} / ${GAME.config.warhead.toUpperCase()} / ${GAME.config.sensor.toUpperCase()}`;
+};
+
+window.setSubTarget = (key) => {
+    sfx.init(); sfx.playBeep(1480, 0.08);
+    GAME.lockedSubTarget = key;
+    document.getElementById('val-subtarget').innerText = SUBTARGET_INFO[key].name;
+
+    ['core', 'turret', 'engine'].forEach(k => {
+        document.getElementById(`btn-sub-${k}`).classList.toggle('active', k === key);
+        document.getElementById(`marker-${k}`).classList.toggle('locked', k === key);
+    });
+};
+
+window.cycleSubTarget = () => {
+    const order = ['core', 'turret', 'engine'];
+    const next = order[(order.indexOf(GAME.lockedSubTarget) + 1) % order.length];
+    setSubTarget(next);
+};
+
+/* ============================================================================
+   3. KHỞI TẠO KHÔNG GIAN 3D & POST-PROCESSING
+   ============================================================================ */
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x02060d, 0.00042);
+
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 8000);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.25;
+container.appendChild(renderer.domElement);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.4, 0.4, 0.8);
+composer.addPass(bloomPass);
+
+const sunLight = new THREE.DirectionalLight(0xfff4e0, 3.2);
+sunLight.position.set(400, 300, -500);
+scene.add(sunLight);
+
+const planetShine = new THREE.HemisphereLight(0x0077ff, 0x050510, 0.9);
+scene.add(planetShine);
+
+/* ============================================================================
+   4. DỰNG THIÊN THỂ, TÀU MẸ ĐA PHÂN HỆ & TÊN LỬA 2 TẦNG
+   ============================================================================ */
+const starGeo = new THREE.BufferGeometry();
+const starPos = new Float32Array(6000 * 3);
+for (let i = 0; i < 6000 * 3; i++) starPos[i] = (Math.random() - 0.5) * 5000;
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 1.4, transparent: true, opacity: 0.85 })));
+
+// Trái Đất
+const earthGroup = new THREE.Group();
+const earthMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(280, 64, 64),
+    new THREE.MeshStandardMaterial({ color: 0x123a6b, roughness: 0.65, metalness: 0.15 })
+);
+earthGroup.add(earthMesh);
+earthGroup.add(new THREE.Mesh(
+    new THREE.SphereGeometry(288, 64, 64),
+    new THREE.MeshBasicMaterial({ color: 0x00aaff, transparent: true, opacity: 0.18, side: THREE.BackSide, blending: THREE.AdditiveBlending })
+));
+earthGroup.position.set(0, -285, 0);
+scene.add(earthGroup);
+
+// Hành tinh Gravity Assist (Sao Mộc)
+const jupiterMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(95, 48, 48),
+    new THREE.MeshStandardMaterial({ color: 0xc98a5b, roughness: 0.8 })
+);
+jupiterMesh.position.set(220, 60, -900);
+scene.add(jupiterMesh);
+
+// TÀU MẸ NGOÀI HÀNH TINH VỚI 3 ĐIỂM YẾU RÕ RỆT (CORE, CIWS TURRET, HYPER-DRIVE ENGINE)
+const mothership = new THREE.Group();
+const hullMat = new THREE.MeshStandardMaterial({ color: 0x2a3540, metalness: 0.85, roughness: 0.25 });
+
+const ringGeo = new THREE.TorusGeometry(44, 4.5, 16, 64);
+const ring1 = new THREE.Mesh(ringGeo, hullMat);
+const ring2 = new THREE.Mesh(ringGeo, hullMat);
+ring2.rotation.x = Math.PI / 2;
+mothership.add(ring1, ring2);
+
+// Thanh dầm ngang nối 2 cánh
+const crossBeam = new THREE.Mesh(new THREE.BoxGeometry(110, 5, 8), hullMat);
+mothership.add(crossBeam);
+
+// [Điểm yếu 1]: Lõi phản ứng chính (Reactor Core) ở trung tâm (0, 0, 0)
+const coreMat = new THREE.MeshStandardMaterial({ color: 0xff2a2a, emissive: 0xff0000, emissiveIntensity: 2.5, wireframe: true });
+const mothershipCore = new THREE.Mesh(new THREE.OctahedronGeometry(14, 2), coreMat);
+mothership.add(mothershipCore);
+
+// [Điểm yếu 2]: Cụm Tháp Pháo Phòng Không (CIWS Turret Array) ở cánh phải (+48, +16, 0)
+const turretSubGroup = new THREE.Group();
+turretSubGroup.position.set(48, 16, 0);
+const turretBase = new THREE.Mesh(
+    new THREE.BoxGeometry(14, 14, 14),
+    new THREE.MeshStandardMaterial({ color: 0xffaa00, emissive: 0xff5500, emissiveIntensity: 1.4, metalness: 0.7 })
+);
+turretSubGroup.add(turretBase);
+mothership.add(turretSubGroup);
+
+// [Điểm yếu 3]: Cụm Động Cơ Đẩy Siêu Không Gian (Hyper-Drive Engine) ở cánh trái (-48, -16, 0)
+const engineSubGroup = new THREE.Group();
+engineSubGroup.position.set(-48, -16, 0);
+const engineNozzle = new THREE.Mesh(
+    new THREE.CylinderGeometry(9, 13, 18, 24),
+    new THREE.MeshStandardMaterial({ color: 0x00f3ff, emissive: 0x0088ff, emissiveIntensity: 1.8, metalness: 0.8 })
+);
+engineNozzle.rotation.x = Math.PI / 2;
+engineSubGroup.add(engineNozzle);
+mothership.add(engineSubGroup);
+
+mothership.position.set(0, 0, -2200);
+scene.add(mothership);
+
+const SUBTARGET_MESHES = {
+    core: mothershipCore,
+    turret: turretSubGroup,
+    engine: engineSubGroup
+};
+
+// Tên lửa hành trình 2 tầng
+const missileGroup = new THREE.Group();
+const upperStage = new THREE.Group();
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd8e2ec, metalness: 0.8, roughness: 0.25 });
+const darkMat = new THREE.MeshStandardMaterial({ color: 0x1c242b, metalness: 0.9, roughness: 0.3 });
+
+const noseCone = new THREE.Mesh(new THREE.ConeGeometry(1.1, 4.2, 32), darkMat);
+noseCone.position.y = 4.6;
+upperStage.add(noseCone);
+
+const upperBody = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 5.0, 32), bodyMat);
+upperStage.add(upperBody);
+
+for (let i = 0; i < 4; i++) {
+    const fin = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.8, 1.6), darkMat);
+    const angle = (i * Math.PI) / 2;
+    fin.position.set(Math.cos(angle) * 1.1, -1.4, Math.sin(angle) * 1.1);
+    fin.rotation.y = -angle;
+    upperStage.add(fin);
+}
+
+const plume2Mat = new THREE.MeshBasicMaterial({ color: 0x00f3ff, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending });
+const plume2 = new THREE.Mesh(new THREE.ConeGeometry(0.85, 6.5, 24), plume2Mat);
+plume2.rotation.x = Math.PI;
+plume2.position.y = -5.5;
+upperStage.add(plume2);
+missileGroup.add(upperStage);
+
+const boosterStage = new THREE.Group();
+const boosterBody = new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.4, 6.5, 32), bodyMat);
+boosterBody.position.y = -5.8;
+boosterStage.add(boosterBody);
+
+const plume1Mat = new THREE.MeshBasicMaterial({ color: 0xffaa22, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending });
+const plume1 = new THREE.Mesh(new THREE.ConeGeometry(1.3, 11, 24), plume1Mat);
+plume1.rotation.x = Math.PI;
+plume1.position.y = -14.2;
+boosterStage.add(plume1);
+
+missileGroup.add(boosterStage);
+missileGroup.rotation.x = -Math.PI / 2;
+scene.add(missileGroup);
+
+/* ============================================================================
+   5. CHUYỂN ĐỔI GÓC NHÌN SEEKER CAM [C] & BỘ LỌC ẢNH NHIỆT FLIR [V]
+   ============================================================================ */
+const astMat = new THREE.MeshStandardMaterial({ color: 0x55504a, roughness: 0.9, emissive: 0x000000 });
+
+window.toggleCameraMode = () => {
+    if (GAME.phase === 1) return;
+    sfx.init(); sfx.playBeep(1050, 0.07);
+    GAME.cameraMode = GAME.cameraMode === 'chase' ? 'nosecone' : 'chase';
+
+    const isNose = GAME.cameraMode === 'nosecone';
+    document.getElementById('seeker-overlay').style.display = isNose ? 'block' : 'none';
+    document.getElementById('reticle').style.display = isNose ? 'none' : 'flex';
+    const btnCam = document.getElementById('btn-cam');
+    btnCam.innerText = isNose ? '[C] CAM: NOSECONE' : '[C] CAM: CHASE';
+    btnCam.classList.toggle('active', isNose);
+};
+
+window.cycleVisionMode = () => {
+    sfx.init(); sfx.playBeep(1320, 0.07);
+    const modes = ['normal', 'thermal', 'nvg'];
+    GAME.visionMode = modes[(modes.indexOf(GAME.visionMode) + 1) % modes.length];
+
+    document.body.classList.remove('vision-thermal', 'vision-nvg');
+    const btnVis = document.getElementById('btn-vis');
+    const seekerTxt = document.getElementById('seeker-mode-txt');
+
+    if (GAME.visionMode === 'thermal') {
+        document.body.classList.add('vision-thermal');
+        btnVis.innerText = '[V] SENSOR: FLIR THERMAL';
+        btnVis.classList.add('active');
+        seekerTxt.innerText = 'FLIR INFRA-RED HOT-TRACK';
+        astMat.emissive.setHex(0x2266ff);
+        hullMat.emissive.setHex(0x1144aa);
+        bloomPass.strength = 2.1;
+    } else if (GAME.visionMode === 'nvg') {
+        document.body.classList.add('vision-nvg');
+        btnVis.innerText = '[V] SENSOR: NIGHT VISION';
+        btnVis.classList.add('active');
+        seekerTxt.innerText = 'LIGHT AMPLIFICATION NVG';
+        astMat.emissive.setHex(0x113311);
+        hullMat.emissive.setHex(0x002200);
+        bloomPass.strength = 1.8;
+    } else {
+        btnVis.innerText = '[V] SENSOR: NORMAL';
+        btnVis.classList.remove('active');
+        seekerTxt.innerText = 'DAYLIGHT OPTICAL TV';
+        astMat.emissive.setHex(0x000000);
+        hullMat.emissive.setHex(0x000000);
+        bloomPass.strength = 1.4;
+    }
+};
+
+// Nhiễu sóng điện từ EMP
+const noiseCanvas = document.getElementById('noise-canvas');
+const nCtx = noiseCanvas.getContext('2d');
+noiseCanvas.width = 256; noiseCanvas.height = 144;
+
+function renderEMPStatic(intensity) {
+    noiseCanvas.style.opacity = intensity;
+    if (intensity <= 0.01) return;
+    const imgData = nCtx.createImageData(noiseCanvas.width, noiseCanvas.height);
+    const buf = imgData.data;
+    for (let i = 0; i < buf.length; i += 4) {
+        const val = Math.random() * 255;
+        buf[i] = val; buf[i + 1] = val; buf[i + 2] = val; buf[i + 3] = 180;
+    }
+    nCtx.putImageData(imgData, 0, 0);
+}
+
+/* ============================================================================
+   6. HỆ THỐNG BẢN ĐỒ RADAR 3D THU NHỎ & CHIẾU TỌA ĐỘ KHÓA MỤC TIÊU 3D->2D
+   ============================================================================ */
+const radarCanvas = document.getElementById('radar-canvas');
+const rCtx = radarCanvas.getContext('2d');
+
+function drawTacticalRadar(dt) {
+    const w = radarCanvas.width;
+    const h = radarCanvas.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const radius = w / 2 - 6;
+
+    rCtx.clearRect(0, 0, w, h);
+
+    // Vẽ lưới vòng tròn cự ly Radar
+    rCtx.strokeStyle = 'rgba(0, 243, 255, 0.25)';
+    rCtx.lineWidth = 1;
+    [0.33, 0.66, 1.0].forEach(r => {
+        rCtx.beginPath();
+        rCtx.arc(cx, cy, radius * r, 0, Math.PI * 2);
+        rCtx.stroke();
+    });
+
+    // Trục tọa độ chữ thập & Phễu góc nhìn (FOV Cone)
+    rCtx.beginPath();
+    rCtx.moveTo(cx, 4); rCtx.lineTo(cx, h - 4);
+    rCtx.moveTo(4, cy); rCtx.lineTo(w - 4, cy);
+    rCtx.stroke();
+
+    rCtx.strokeStyle = 'rgba(0, 243, 255, 0.4)';
+    rCtx.beginPath();
+    rCtx.moveTo(cx, cy + 25);
+    rCtx.lineTo(cx - 48, 12);
+    rCtx.moveTo(cx, cy + 25);
+    rCtx.lineTo(cx + 48, 12);
+    rCtx.stroke();
+
+    // Tia quét Radar xoay tròn (Sweeping Radar Beam)
+    GAME.radarSweepAngle = (GAME.radarSweepAngle + dt * 3.8) % (Math.PI * 2);
+    rCtx.save();
+    rCtx.translate(cx, cy);
+    rCtx.rotate(GAME.radarSweepAngle);
+    const grad = rCtx.createLinearGradient(0, 0, radius, 0);
+    grad.addColorStop(0, 'rgba(0, 255, 120, 0.55)');
+    grad.addColorStop(1, 'rgba(0, 255, 120, 0.0)');
+    rCtx.strokeStyle = grad;
+    rCtx.lineWidth = 2;
+    rCtx.beginPath();
+    rCtx.moveTo(0, 0);
+    rCtx.lineTo(radius, 0);
+    rCtx.stroke();
+    rCtx.restore();
+
+    // Tầm quét phụ thuộc vào việc lắp Radar Mảng Pha hay cảm biến thường
+    const maxRangeZ = GAME.config.sensor === 'radar' ? 1400 : 900;
+    document.getElementById('radar-range-lbl').innerText = `RNG: ${maxRangeZ}km`;
+
+    // Vị trí tên lửa của người chơi (Đặt ở tâm lệch dưới một chút)
+    const playerRadarY = cy + 25;
+    rCtx.fillStyle = '#00f3ff';
+    rCtx.beginPath();
+    rCtx.moveTo(cx, playerRadarY - 5);
+    rCtx.lineTo(cx - 4, playerRadarY + 4);
+    rCtx.lineTo(cx + 4, playerRadarY + 4);
+    rCtx.closePath();
+    rCtx.fill();
+
+    // Vẽ Thiên thạch lên Radar (kèm vạch chiều cao 3D)
+    asteroids.forEach(a => {
+        const dz = missileGroup.position.z - a.position.z; // Dương nghĩa là ở phía trước
+        const dx = a.position.x - missileGroup.position.x;
+        const dy = a.position.y - missileGroup.position.y;
+        if (dz > -60 && dz < maxRangeZ) {
+            const rx = cx + (dx / 160) * radius;
+            const ry = playerRadarY - (dz / maxRangeZ) * (radius + 15);
+            if (Math.hypot(rx - cx, ry - cy) < radius) {
+                // Vạch độ cao 3D (Elevation Stalk)
+                rCtx.strokeStyle = 'rgba(150, 180, 200, 0.45)';
+                rCtx.beginPath();
+                rCtx.moveTo(rx, ry);
+                rCtx.lineTo(rx, ry - dy * 0.12);
+                rCtx.stroke();
+
+                rCtx.fillStyle = '#99b0c4';
+                rCtx.fillRect(rx - 1.5, ry - 1.5, 3, 3);
+            }
+        }
+    });
+
+    // Vẽ Đạn phòng không CIWS địch (Chấm đỏ)
+    enemyBullets.forEach(b => {
+        const dz = missileGroup.position.z - b.position.z;
+        const dx = b.position.x - missileGroup.position.x;
+        if (dz > -30 && dz < maxRangeZ) {
+            const rx = cx + (dx / 160) * radius;
+            const ry = playerRadarY - (dz / maxRangeZ) * (radius + 15);
+            if (Math.hypot(rx - cx, ry - cy) < radius) {
+                rCtx.fillStyle = '#ff2a2a';
+                rCtx.beginPath();
+                rCtx.arc(rx, ry, 2.2, 0, Math.PI * 2);
+                rCtx.fill();
+            }
+        }
+    });
+
+    // Vẽ Tàu mẹ và 3 Điểm yếu lên Radar
+    ['core', 'turret', 'engine'].forEach(key => {
+        const worldPos = new THREE.Vector3();
+        SUBTARGET_MESHES[key].getWorldPosition(worldPos);
+        const dz = missileGroup.position.z - worldPos.z;
+        const dx = worldPos.x - missileGroup.position.x;
+        const rx = THREE.MathUtils.clamp(cx + (dx / 160) * radius, cx - radius + 6, cx + radius - 6);
+        const ry = THREE.MathUtils.clamp(playerRadarY - (dz / maxRangeZ) * (radius + 15), cy - radius + 6, cy + radius - 6);
+
+        if (key === GAME.lockedSubTarget) {
+            rCtx.strokeStyle = '#ff2a2a';
+            rCtx.lineWidth = 1.5;
+            rCtx.strokeRect(rx - 4, ry - 4, 8, 8);
+        } else {
+            rCtx.fillStyle = '#00ff66';
+            rCtx.fillRect(rx - 2, ry - 2, 4, 4);
+        }
+    });
+}
+
+// Chiếu vị trí 3D của 3 điểm yếu lên màn hình HUD 2D
+function updateSubTargetHUDMarkers() {
+    const showMarkers = GAME.phase >= 2 && GAME.phase <= 4;
+    ['core', 'turret', 'engine'].forEach(key => {
+        const el = document.getElementById(`marker-${key}`);
+        if (!showMarkers) {
+            el.style.display = 'none';
+            return;
+        }
+        const worldPos = new THREE.Vector3();
+        SUBTARGET_MESHES[key].getWorldPosition(worldPos);
+        const projected = worldPos.clone().project(camera);
+
+        // Kiểm tra nằm phía trước Camera
+        if (projected.z < 1.0) {
+            const x = (projected.x * 0.5 + 0.5) * window.innerWidth;
+            const y = (-(projected.y * 0.5) + 0.5) * window.innerHeight;
+            el.style.display = 'block';
+            el.style.left = `${x}px`;
+            el.style.top = `${y}px`;
+        } else {
+            el.style.display = 'none';
+        }
+    });
+}
+
+/* ============================================================================
+   7. QUỸ ĐẠO ASTROGATION & VẬT THỂ KHÔNG GIAN
+   ============================================================================ */
+let trajectoryLine = null;
+window.updateTrajectoryPreview = () => {
+    const angle = parseFloat(document.getElementById('sl-angle').value);
+    const win = parseFloat(document.getElementById('sl-window').value);
+    document.getElementById('lbl-angle').innerText = `${angle}°`;
+    document.getElementById('lbl-window').innerText = `HIỆU SUẤT ${win}%`;
+
+    if (trajectoryLine) scene.remove(trajectoryLine);
+    const curve = new THREE.CatmullRomCurve3([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(angle * 3.5, 45, -350),
+        new THREE.Vector3(160 * (win / 100), 30, -900),
+        new THREE.Vector3(0, 0, -2200)
+    ]);
+    trajectoryLine = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(curve.getPoints(80)),
+        new THREE.LineBasicMaterial({ color: 0x00f3ff })
+    );
+    scene.add(trajectoryLine);
+};
+updateTrajectoryPreview();
+
+const asteroids = [];
+const enemyBullets = [];
+const flares = [];
+const mirvProjectiles = [];
+const astGeo = new THREE.DodecahedronGeometry(6.5, 1);
+
+function spawnAsteroidField() {
+    for (let i = 0; i < 45; i++) {
+        const mesh = new THREE.Mesh(astGeo, astMat);
+        const s = 0.6 + Math.random() * 2.2;
+        mesh.scale.set(s, s, s);
+        mesh.position.set(
+            (Math.random() - 0.5) * 180,
+            (Math.random() - 0.5) * 120,
+            missileGroup.position.z - 250 - Math.random() * 900
+        );
+        scene.add(mesh);
+        asteroids.push(mesh);
+    }
+}
+
+// Đạn phòng không CIWS xuất phát trực tiếp từ Cụm Tháp Pháo trên Tàu mẹ
+function spawnEnemyCIWS() {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(0.95, 8, 8), new THREE.MeshBasicMaterial({ color: 0xff2a2a }));
+    const turretWorldPos = new THREE.Vector3();
+    turretSubGroup.getWorldPosition(turretWorldPos);
+    b.position.copy(turretWorldPos);
+    b.position.x += (Math.random() - 0.5) * 20;
+    b.position.y += (Math.random() - 0.5) * 20;
+    scene.add(b);
+    enemyBullets.push(b);
+}
+
+function deployFlare() {
+    if (GAME.flares <= 0 || GAME.phase < 3) return;
+    GAME.flares--;
+    sfx.playBeep(620, 0.15);
+    document.getElementById('val-flares').innerText =
+        '■ '.repeat(GAME.flares) + '□ '.repeat(5 - GAME.flares) + `(${GAME.flares}/5)`;
+
+    for (let i = -1; i <= 1; i += 2) {
+        const f = new THREE.Mesh(new THREE.SphereGeometry(1.2, 12, 12), new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+        f.position.copy(missileGroup.position);
+        f.userData = { vx: i * 18, vy: -12, life: 3.0 };
+        scene.add(f);
+        flares.push(f);
+    }
+}
+
+/* ============================================================================
+   8. SỰ KIỆN PHÍM BẤM & LUỒNG NHIỆM VỤ
+   ============================================================================ */
+window.addEventListener('keydown', (e) => {
+    const code = e.code;
+    if (code === 'Tab') { e.preventDefault(); cycleSubTarget(); }
+    if (code === 'Digit1') setSubTarget('core');
+    if (code === 'Digit2') setSubTarget('turret');
+    if (code === 'Digit3') setSubTarget('engine');
+    if (code === 'KeyA' || code === 'ArrowLeft') GAME.targetSteerX = -1;
+    if (code === 'KeyD' || code === 'ArrowRight') GAME.targetSteerX = 1;
+    if (code === 'KeyW' || code === 'ArrowUp') GAME.targetSteerY = 1;
+    if (code === 'KeyS' || code === 'ArrowDown') GAME.targetSteerY = -1;
+    if (code === 'ShiftLeft') GAME.boosting = true;
+    if (code === 'KeyF') deployFlare();
+    if (code === 'KeyC') toggleCameraMode();
+    if (code === 'KeyV') cycleVisionMode();
+    if (code === 'KeyT') {
+        GAME.timeScale = GAME.timeScale === 1.0 ? 0.35 : 1.0;
+        sfx.playBeep(GAME.timeScale < 1 ? 420 : 880, 0.12);
+    }
+    if (code === 'Space') handleSpaceAction();
+});
+
+window.addEventListener('keyup', (e) => {
+    const code = e.code;
+    if (['KeyA', 'KeyD', 'ArrowLeft', 'ArrowRight'].includes(code)) GAME.targetSteerX = 0;
+    if (['KeyW', 'KeyS', 'ArrowUp', 'ArrowDown'].includes(code)) GAME.targetSteerY = 0;
+    if (code === 'ShiftLeft') GAME.boosting = false;
+});
+
+window.addEventListener('mousemove', (e) => {
+    if (GAME.phase >= 2 && GAME.phase <= 4) {
+        GAME.targetSteerX = ((e.clientX / window.innerWidth) * 2 - 1) * 1.1;
+        GAME.targetSteerY = (-(e.clientY / window.innerHeight) * 2 + 1) * 1.1;
+    }
+});
+
+document.getElementById('qte-prompt').addEventListener('click', handleSpaceAction);
+
+function handleSpaceAction() {
+    if (GAME.phase === 2 && GAME.qteActive && !GAME.stageSeparated) separateStage();
+    else if (GAME.phase === 4 && GAME.config.warhead === 'mirv' && !GAME.mirvDeployed) deployMIRV();
+}
+
+window.initiateLaunch = () => {
+    sfx.init(); sfx.playExplosion(2.0, 120);
+    document.getElementById('mission-control').style.display = 'none';
+    if (trajectoryLine) trajectoryLine.visible = false;
+
+    GAME.phase = 2;
+    GAME.velocity = 2.8;
+    plume1Mat.opacity = 0.92;
+    document.getElementById('hud-phase').innerText = 'GIAI ĐOẠN 2: ATMOSPHERIC ASCENT';
+    document.getElementById('val-guidance').innerText = 'GRAVITY TURN - MAX-Q';
+
+    setTimeout(() => {
+        if (GAME.phase === 2 && !GAME.stageSeparated) {
+            GAME.qteActive = true;
+            document.getElementById('qte-prompt').style.display = 'block';
+            sfx.playBeep(950, 0.25);
+        }
+    }, 4500);
+};
+
+function separateStage() {
+    GAME.stageSeparated = true;
+    GAME.qteActive = false;
+    document.getElementById('qte-prompt').style.display = 'none';
+    sfx.playExplosion(0.9, 240);
+
+    plume1Mat.opacity = 0;
+    plume2Mat.opacity = 0.95;
+    plume2Mat.color.setHex(GAME.config.engine === 'ion' ? 0x00f3ff : (GAME.config.engine === 'fusion' ? 0xd400ff : 0xffaa00));
+
+    GAME.phase = 3;
+    GAME.velocity += 5.5;
+    document.getElementById('hud-phase').innerText = 'GIAI ĐOẠN 3: DEEP SPACE CRUISE';
+    document.getElementById('val-guidance').innerText = 'PROPORTIONAL NAV (ACTIVE)';
+    document.getElementById('alert-banner').style.display = 'block';
+    spawnAsteroidField();
+}
+
+// Khi phóng MIRV ở Phase 4: 6 đầu đạn con tự động chia nhau lao vào cả 3 điểm yếu (Core, Turret, Engine)
+function deployMIRV() {
+    GAME.mirvDeployed = true;
+    sfx.playExplosion(0.7, 300);
+    const keys = ['core', 'turret', 'engine'];
+    for (let i = 0; i < 6; i++) {
+        const m = new THREE.Mesh(new THREE.ConeGeometry(0.45, 2.0, 12), new THREE.MeshBasicMaterial({ color: 0x00ffaa }));
+        m.position.copy(missileGroup.position);
+        m.rotation.x = -Math.PI / 2;
+        m.userData = { targetKey: keys[i % 3], spreadX: (Math.random() - 0.5) * 4, spreadY: (Math.random() - 0.5) * 4 };
+        scene.add(m);
+        mirvProjectiles.push(m);
+    }
+}
+
+function finishMission(success, reason) {
+    GAME.phase = 5;
+    renderEMPStatic(0);
+    updateSubTargetHUDMarkers();
+    sfx.playExplosion(2.2, success ? 80 : 160);
+    document.getElementById('alert-banner').style.display = 'none';
+    document.getElementById('qte-prompt').style.display = 'none';
+
+    const endEl = document.getElementById('end-screen');
+    const titleEl = document.getElementById('end-title');
+    endEl.style.display = 'block';
+
+    titleEl.innerText = success ? 'TÁC CHIẾN THÀNH CÔNG: MỤC TIÊU BỊ TRIỆT HẠ' : 'NHIỆM VỤ THẤT BẠI: MẤT TÍN HIỆU TÊN LỬA';
+    titleEl.style.color = success ? 'var(--green)' : 'var(--red)';
+
+    const kineticEnergy = Math.round(0.5 * 1200 * Math.pow(GAME.velocity, 2));
+    document.getElementById('end-desc').innerText = reason;
+    document.getElementById('end-stats').innerHTML = `
+        <div>• Điểm yếu công kích: <strong>${SUBTARGET_INFO[GAME.lockedSubTarget].name}</strong></div>
+        <div>• Hiệu quả chiến thuật: <strong>${SUBTARGET_INFO[GAME.lockedSubTarget].desc}</strong></div>
+        <div>• Vận tốc va chạm cuối: <strong>${GAME.velocity.toFixed(1)} km/s (${kineticEnergy.toLocaleString()} MJ)</strong></div>
+        <div>• Độ bền thân vỏ còn lại: <strong>${Math.max(0, Math.round(GAME.hull))}%</strong></div>
+    `;
+}
+
+window.resetToPhase1 = () => {
+    GAME.phase = 1;
+    GAME.fuel = 100; GAME.hull = 100; GAME.flares = 5;
+    GAME.velocity = 0; GAME.distance = 12500;
+    GAME.stageSeparated = false; GAME.qteActive = false; GAME.mirvDeployed = false;
+    if (GAME.cameraMode === 'nosecone') toggleCameraMode();
+
+    missileGroup.position.set(0, 0, 0);
+    boosterStage.position.set(0, 0, 0); boosterStage.rotation.set(0, 0, 0);
+    plume1Mat.opacity = 0; plume2Mat.opacity = 0;
+
+    asteroids.forEach(a => scene.remove(a)); asteroids.length = 0;
+    enemyBullets.forEach(b => scene.remove(b)); enemyBullets.length = 0;
+    flares.forEach(f => scene.remove(f)); flares.length = 0;
+    mirvProjectiles.forEach(m => scene.remove(m)); mirvProjectiles.length = 0;
+
+    updateSubTargetHUDMarkers();
+    if (trajectoryLine) trajectoryLine.visible = true;
+    document.getElementById('val-flares').innerText = '■ ■ ■ ■ ■ (5/5)';
+    document.getElementById('end-screen').style.display = 'none';
+    document.getElementById('mission-control').style.display = 'block';
+    document.getElementById('hud-phase').innerText = 'GIAI ĐOẠN 1: ASTROGATION';
+};
+
+/* ============================================================================
+   9. VÒNG LẶP VẬT LÝ, DẪN ĐƯỜNG TỶ LỆ THEO ĐIỂM YẾU & CẬP NHẬT RADAR
+   ============================================================================ */
+const clock = new THREE.Clock();
+
+function animate() {
+    requestAnimationFrame(animate);
+    const rawDt = Math.min(clock.getDelta(), 0.05);
+    const dt = rawDt * GAME.timeScale;
+
+    earthMesh.rotation.y += 0.03 * dt;
+    jupiterMesh.rotation.y += 0.08 * dt;
+    // Tàu mẹ xoay chậm tạo thử thách ngắm bắn động vào các điểm yếu ở 2 cánh
+    mothership.rotation.z += 0.22 * dt;
+    mothershipCore.rotation.x += 1.2 * dt;
+
+    // Lấy tọa độ thực (World Position) của Điểm yếu đang khóa trên Tàu mẹ
+    const lockedWorldPos = new THREE.Vector3();
+    SUBTARGET_MESHES[GAME.lockedSubTarget].getWorldPosition(lockedWorldPos);
+
+    if (GAME.phase === 1) {
+        const t = performance.now() * 0.0004;
+        camera.position.set(Math.sin(t) * 22, 8, Math.cos(t) * 22);
+        camera.lookAt(0, 0, -8);
+    } 
+    else if (GAME.phase >= 2 && GAME.phase <= 4) {
+        const accelRate = GAME.config.engine === 'fusion' ? 3.5 : (GAME.config.engine === 'chem' ? 2.6 : 1.8);
+        const fuelBurn = GAME.config.engine === 'ion' ? 1.2 : 2.8;
+        const boostMult = (GAME.boosting && GAME.fuel > 0) ? 1.85 : 1.0;
+
+        if (GAME.fuel > 0) {
+            GAME.velocity += accelRate * boostMult * dt;
+            GAME.fuel = Math.max(0, GAME.fuel - fuelBurn * boostMult * dt);
+        }
+
+        GAME.steerX += (GAME.targetSteerX - GAME.steerX) * 6 * dt;
+        GAME.steerY += (GAME.targetSteerY - GAME.steerY) * 6 * dt;
+
+        const forwardSpeed = (45 + GAME.velocity * 4.2) * boostMult;
+        missileGroup.position.z -= forwardSpeed * dt;
+        missileGroup.position.x += GAME.steerX * 52 * dt;
+        missileGroup.position.y += GAME.steerY * 42 * dt;
+
+        // Gravity Assist
+        const distToJupiter = missileGroup.position.distanceTo(jupiterMesh.position);
+        if (distToJupiter < 380) {
+            const gravPull = new THREE.Vector3().subVectors(jupiterMesh.position, missileGroup.position).normalize();
+            missileGroup.position.addScaledVector(gravPull, (1800 / (distToJupiter + 40)) * dt);
+            GAME.velocity += 1.5 * dt;
+        }
+
+        upperStage.rotation.z = -GAME.steerX * 0.55;
+        upperStage.rotation.x = GAME.steerY * 0.35;
+
+        if (GAME.cameraMode === 'nosecone') {
+            const ladder = document.getElementById('pitch-ladder');
+            ladder.style.transform = `translate(-50%, calc(-50% + ${GAME.steerY * 35}px)) rotate(${-GAME.steerX * 22}deg)`;
+        }
+
+        if (GAME.stageSeparated) {
+            boosterStage.position.z += 38 * dt;
+            boosterStage.position.y -= 14 * dt;
+            boosterStage.rotation.x += 0.9 * dt;
+        }
+
+        const flicker = 0.88 + Math.random() * 0.28;
+        plume1.scale.set(1, flicker, 1);
+        plume2.scale.set(1, flicker * boostMult, 1);
+
+        const distZ = Math.abs(missileGroup.position.z - mothership.position.z);
+        GAME.distance = Math.max(0, Math.round(distZ * 5.5));
+
+        if (distZ < 320) {
+            renderEMPStatic(Math.min(0.38, (1 - distZ / 320) * 0.38));
+        } else {
+            renderEMPStatic(0);
+        }
+
+        if (GAME.phase === 3 && distZ < 650) {
+            GAME.phase = 4;
+            sfx.playBeep(1350, 0.2);
+            document.getElementById('hud-phase').innerText = 'GIAI ĐOẠN 4: TERMINAL SPRINT';
+            document.getElementById('val-guidance').innerText = 'SUB-TARGET PN LOCK';
+            if (GAME.cameraMode === 'chase') toggleCameraMode();
+        }
+
+        // Dẫn đường tỷ lệ (Proportional Navigation) bám theo Điểm Yếu Đã Khóa ở Phase 4
+        if (GAME.phase === 4) {
+            const pnStrength = GAME.config.sensor === 'ai' ? 3.8 : 1.5;
+            missileGroup.position.x = THREE.MathUtils.lerp(missileGroup.position.x, lockedWorldPos.x, pnStrength * dt);
+            missileGroup.position.y = THREE.MathUtils.lerp(missileGroup.position.y, lockedWorldPos.y, pnStrength * dt);
+        }
+
+        // Va chạm thiên thạch
+        for (let i = asteroids.length - 1; i >= 0; i--) {
+            const a = asteroids[i];
+            a.rotation.x += 0.5 * dt;
+            if (a.position.distanceTo(missileGroup.position) < 9.5) {
+                GAME.hull -= 28;
+                sfx.playExplosion(0.5, 190);
+                renderEMPStatic(0.65);
+                scene.remove(a);
+                asteroids.splice(i, 1);
+            }
+        }
+
+        // Đạn phòng không CIWS
+        if (GAME.phase >= 3 && Math.random() < 0.14) spawnEnemyCIWS();
+
+        for (let i = enemyBullets.length - 1; i >= 0; i--) {
+            const b = enemyBullets[i];
+            b.position.z += 260 * dt;
+
+            if (flares.length > 0) {
+                b.position.x = THREE.MathUtils.lerp(b.position.x, flares[0].position.x, 5 * dt);
+                b.position.y = THREE.MathUtils.lerp(b.position.y, flares[0].position.y, 5 * dt);
+            } else {
+                const trackRate = GAME.config.sensor === 'stealth' ? 0.6 : 1.6;
+                b.position.x = THREE.MathUtils.lerp(b.position.x, missileGroup.position.x, trackRate * dt);
+                b.position.y = THREE.MathUtils.lerp(b.position.y, missileGroup.position.y, trackRate * dt);
+            }
+
+            if (b.position.distanceTo(missileGroup.position) < 4.5) {
+                GAME.hull -= 14;
+                sfx.playExplosion(0.3, 320);
+                renderEMPStatic(0.5);
+                scene.remove(b);
+                enemyBullets.splice(i, 1);
+            } else if (b.position.z > missileGroup.position.z + 30) {
+                scene.remove(b);
+                enemyBullets.splice(i, 1);
+            }
+        }
+
+        // Mồi bẫy nhiệt
+        for (let i = flares.length - 1; i >= 0; i--) {
+            const f = flares[i];
+            f.position.x += f.userData.vx * dt;
+            f.position.y += f.userData.vy * dt;
+            f.userData.life -= dt;
+            if (f.userData.life <= 0) { scene.remove(f); flares.splice(i, 1); }
+        }
+
+        // Đầu đạn con MIRV chia nhau bám vào từng Điểm yếu
+        mirvProjectiles.forEach(m => {
+            const subPos = new THREE.Vector3();
+            SUBTARGET_MESHES[m.userData.targetKey].getWorldPosition(subPos);
+            m.position.z -= (forwardSpeed + 85) * dt;
+            m.position.x = THREE.MathUtils.lerp(m.position.x, subPos.x + m.userData.spreadX, 4.5 * dt);
+            m.position.y = THREE.MathUtils.lerp(m.position.y, subPos.y + m.userData.spreadY, 4.5 * dt);
+        });
+
+        // Kiểm tra kết thúc nhiệm vụ dựa trên Điểm yếu đã khóa
+        if (GAME.hull <= 0) {
+            finishMission(false, 'Tín hiệu đầu dò quang học bị ngắt! Tên lửa hành trình đã bị bắn hạ trước khi chạm mục tiêu.');
+        } else if (missileGroup.position.z <= mothership.position.z + 18) {
+            const hitDist = Math.hypot(missileGroup.position.x - lockedWorldPos.x, missileGroup.position.y - lockedWorldPos.y);
+            if (GAME.mirvDeployed) {
+                finishMission(true, 'Toàn bộ 6 đầu đạn phân mảnh MIRV đã đánh trúng đồng thời cả 3 hệ thống: Lõi Phản Ứng, Tháp Pháo CIWS và Động Cơ Hyper-Drive!');
+            } else if (hitDist < 38 || GAME.config.warhead === 'casaba') {
+                finishMission(true, `Đầu đạn ${GAME.config.warhead.toUpperCase()} đã đánh trúng đích ${SUBTARGET_INFO[GAME.lockedSubTarget].name}! ${SUBTARGET_INFO[GAME.lockedSubTarget].desc}.`);
+            } else {
+                finishMission(false, `Tên lửa bay trượt khỏi ${SUBTARGET_INFO[GAME.lockedSubTarget].name} ở giây cuối cùng (Khoảng lệch: ${Math.round(hitDist)}m).`);
+            }
+        }
+
+        // Cập nhật Camera
+        const shake = (GAME.phase === 2 ? 0.35 : 0.08) * (GAME.boosting ? 2.0 : 1.0);
+        if (GAME.cameraMode === 'nosecone') {
+            camera.position.set(
+                missileGroup.position.x + (Math.random() - 0.5) * shake * 0.4,
+                missileGroup.position.y + (Math.random() - 0.5) * shake * 0.4,
+                missileGroup.position.z - 6.2
+            );
+            camera.lookAt(
+                missileGroup.position.x + GAME.steerX * 16,
+                missileGroup.position.y + GAME.steerY * 16,
+                missileGroup.position.z - 120
+            );
+        } else {
+            camera.position.set(
+                missileGroup.position.x * 0.65 + (Math.random() - 0.5) * shake,
+                missileGroup.position.y * 0.65 + 4.5 + (Math.random() - 0.5) * shake,
+                missileGroup.position.z + 18
+            );
+            camera.lookAt(missileGroup.position.x, missileGroup.position.y, missileGroup.position.z - 40);
+        }
+    }
+
+    // Cập nhật HUD, Khung khóa 3D-to-2D và Bản đồ Radar
+    document.getElementById('val-vel').innerText = GAME.velocity.toFixed(1);
+    document.getElementById('val-dist').innerText = GAME.distance.toLocaleString();
+    document.getElementById('bar-fuel').style.width = `${GAME.fuel}%`;
+    document.getElementById('bar-hull').style.width = `${Math.max(0, GAME.hull)}%`;
+    document.getElementById('bar-hull').style.background = GAME.hull > 40 ? 'var(--green)' : 'var(--red)';
+
+    updateSubTargetHUDMarkers();
+    drawTacticalRadar(rawDt);
+
+    composer.render();
+}
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+animate();
+</script>
+</body>
+</html>
